@@ -1,0 +1,18 @@
+project_name: haproxy-secrets-plugin
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    main: ./cmd/haproxy-secrets-plugin/main.go
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w
+archives:
+  - format: binary
+snapshot:
+  name_template: "{{ .Tag }}-next"

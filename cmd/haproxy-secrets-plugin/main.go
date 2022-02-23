@@ -3,11 +3,10 @@ package main
 import (
 	"os"
 
+	"github.com/MGSousa/haproxy-secrets-plugin"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/vault/api"
 	"github.com/hashicorp/vault/sdk/plugin"
-
-	haproxy "github.com/MGSousa/haproxy-secrets-plugin"
 )
 
 func main() {
