@@ -4,7 +4,7 @@ OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 
 echo " ==> Build plugin"
 GOOS=$OS GOARCH="amd64" go build -ldflags="-s -w" \
-  -o vault/plugins/haproxy-secrets-plugin cmd/haproxy-secrets-plugin/main.go
+  -o vault/plugins/haproxy-secrets-plugin cmd/haproxy-secrets-plugin/main.go || exit 1
 
 echo "==> Start Vault"
 vault server -log-level=debug -dev -dev-root-token-id=root -dev-plugin-dir=./vault/plugins & sleep 2
