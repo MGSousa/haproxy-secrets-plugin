@@ -2,25 +2,32 @@ package haproxy
 
 import (
 	"fmt"
-	"io/ioutil"
-	"net/http"
-	"strings"
-
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/helper/jsonutil"
 	"github.com/hashicorp/vault/sdk/logical"
 )
 
-func (b *backend) readSecret(_ ctx, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
-	if err := b.verify(req); err != nil {
+func (b *backend) readSecret(ctx ctx, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
+	if err := b.verifyClient(req); err != nil {
 		return nil, err
 	}
 
 	path := data.Get("path").(string)
 
+	// return secret data from persistence storage
+	entry, err := req.Storage.Get(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	if entry != nil {
+		if err := entry.DecodeJSON(&b.kv); err != nil {
+			return nil, err
+		}
+	}
+
 	// decode the data
 	var rawData map[string]interface{}
-	fetchedData := b.store[fmt.Sprintf("%s/%s", req.ClientToken, path)]
+	fetchedData := b.kv[fmt.Sprintf("%s/%s", req.ClientToken, path)]
 	if fetchedData == nil {
 		resp := logical.ErrorResponse("No value at %v%v", req.MountPoint, req.Path)
 		return resp, nil
@@ -37,11 +44,12 @@ func (b *backend) readSecret(_ ctx, req *logical.Request, data *framework.FieldD
 	return resp, nil
 }
 
-func (b *backend) writeSecret(_ ctx, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
-	if err := b.verify(req); err != nil {
+func (b *backend) writeSecret(ctx ctx, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
+	if err := b.verifyClient(req); err != nil {
 		return nil, err
 	}
-	if len(b.options) == 0 {
+
+	if err, ok := b.readConfigStorage(ctx, req.Storage); err != nil || !ok {
 		return nil, fmt.Errorf("haproxy options must be provided")
 	}
 
@@ -67,48 +75,34 @@ func (b *backend) writeSecret(_ ctx, req *logical.Request, data *framework.Field
 	if !b.options["output"].(bool) {
 		var rawConfig []byte
 
-		if url := b.options["remote"].(string); url != "" {
-			// download HAProxy userlist
-			response, err := http.Get(url)
-			if err != nil {
-				return nil, fmt.Errorf("failed to download HAProxy userlist: %s", err)
-			}
-			defer response.Body.Close()
-
-			// read file contents from buffer
-			if rawConfig, err = ioutil.ReadAll(response.Body); err != nil {
-				return nil, fmt.Errorf("failed to read HAProxy config: %s", err)
+		// read file contents from remote or local
+		if url := b.options["remote_path"].(string); url != "" {
+			if rawConfig, err = readFile(url, true); err != nil {
+				return nil, err
 			}
 
-		} else if file := b.options["local"].(string); file != "" {
-			// read file contents from file
-			if rawConfig, err = ioutil.ReadFile(file); err != nil {
-				return nil, fmt.Errorf("failed to read HAProxy config: %s", err)
+		} else if file := b.options["source_path"].(string); file != "" {
+			if rawConfig, err = readFile(url, false); err != nil {
+				return nil, err
 			}
 		}
 
 		// parse password field
-		config := string(rawConfig)
-		securePass := "password "
-		pos := strings.LastIndex(config, securePass)
-		if pos == -1 {
-			return nil, fmt.Errorf("failed to get HAProxy password: Is empty")
-		}
-		adjustedPos := pos + len(securePass)
-		if adjustedPos >= len(config) {
-			return nil, fmt.Errorf("failed to parse HAProxy userlist")
-		}
-
-		// save file temporary
-		if err := ioutil.WriteFile("userlist.cfg",
-			[]byte(strings.ReplaceAll(config, config[adjustedPos:],
-				fmt.Sprintf("%s", hash))), 0777); err != nil {
-			return nil, fmt.Errorf("failed to set HAProxy password: %s", err)
+		if err = parseFile(string(rawConfig), hash, b.options["target_path"].(string)); err != nil {
+			return nil, err
 		}
 	}
 
-	// Store kv pairs in map at specified path
-	b.store[fmt.Sprintf("%s/%s", req.ClientToken, path)] = buf
+	// store kv pairs in map at specified path
+	b.kv[fmt.Sprintf("%s/%s", req.ClientToken, path)] = buf
+
+	// store kv to persistence storage
+	if b.options["persist"].(bool) {
+		entry, _ := logical.StorageEntryJSON(path, &b.kv)
+		if err := req.Storage.Put(ctx, entry); err != nil {
+			return nil, fmt.Errorf("cannot persist data: %s", err)
+		}
+	}
 
 	var resp *logical.Response
 	if b.options["output"].(bool) {
@@ -120,14 +114,19 @@ func (b *backend) writeSecret(_ ctx, req *logical.Request, data *framework.Field
 	return resp, nil
 }
 
-func (b *backend) deleteSecret(_ ctx, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
-	if err := b.verify(req); err != nil {
+func (b *backend) deleteSecret(ctx ctx, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
+	if err := b.verifyClient(req); err != nil {
 		return nil, err
 	}
 
 	path := data.Get("path").(string)
 
-	// Remove entry for specified path
-	delete(b.store, fmt.Sprintf("%s/%s", req.ClientToken, path))
+	// remove entry for specified path
+	delete(b.kv, fmt.Sprintf("%s/%s", req.ClientToken, path))
+
+	// remove persisted storage, if not exists ignores it
+	if err := req.Storage.Delete(ctx, path); err != nil {
+		return nil, fmt.Errorf("cannot remove persisted data: %s", err)
+	}
 	return nil, nil
 }

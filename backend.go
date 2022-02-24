@@ -8,11 +8,16 @@ import (
 	"github.com/hashicorp/vault/sdk/logical"
 )
 
+const (
+	kvPattern      = "password"
+	optionsPattern = "options"
+)
+
 // backend wraps the backend framework and adds a map for storing key value pairs
 type backend struct {
 	*framework.Backend
 
-	store   map[string][]byte
+	kv      map[string][]byte
 	options map[string]interface{}
 }
 
@@ -37,7 +42,7 @@ func Factory(ctx ctx, conf *logical.BackendConfig) (logical.Backend, error) {
 
 func newBackend() (*backend, error) {
 	b := &backend{
-		store:   make(map[string][]byte),
+		kv:      make(map[string][]byte),
 		options: make(map[string]interface{}),
 	}
 
@@ -56,7 +61,7 @@ func newBackend() (*backend, error) {
 func (b *backend) paths() []*framework.Path {
 	return []*framework.Path{
 		{
-			Pattern:      "password",
+			Pattern:      kvPattern,
 			HelpSynopsis: "Set the path of the secret for HAProxy",
 			Fields: map[string]*framework.FieldSchema{
 				"path": {
@@ -90,7 +95,7 @@ func (b *backend) paths() []*framework.Path {
 func (b *backend) args() []*framework.Path {
 	return []*framework.Path{
 		{
-			Pattern:      "options",
+			Pattern:      optionsPattern,
 			HelpSynopsis: "Set custom options for this plugin",
 			Fields: map[string]*framework.FieldSchema{
 				"output": {
@@ -98,13 +103,17 @@ func (b *backend) args() []*framework.Path {
 					Description: "Defines if secret hashed will be returned, ignores userlist options",
 					Default:     true,
 				},
-				"remote": {
+				"remote_path": {
 					Type:        framework.TypeString,
-					Description: "Userlist file URL to parse from, if set ignores 'local_file'",
+					Description: "Remote userlist file to parse from, if set ignores 'source_path'",
 				},
-				"local": {
+				"source_path": {
 					Type:        framework.TypeString,
-					Description: "Userlist local file to parse from, use this if 'remote_file' not set",
+					Description: "Userlist local file to parse from, use this if 'remote_path' not set",
+				},
+				"target_path": {
+					Type:        framework.TypeString,
+					Description: "Target file path where userlist will be saved",
 				},
 				"crypter": {
 					Type:          framework.TypeString,
@@ -112,9 +121,14 @@ func (b *backend) args() []*framework.Path {
 					AllowedValues: []interface{}{"sha256", "sha512"},
 					Default:       "sha256",
 				},
-				"salt": {
+				"persist": {
+					Type:        framework.TypeBool,
+					Description: "Persist data after seal/unseal",
+					Default:     false,
+				},
+				"field": {
 					Type:        framework.TypeString,
-					Description: "Salt to be used when generate hash (for now not supported in Dataplane API)",
+					Description: "Field reference on delete",
 				},
 			},
 
@@ -124,11 +138,15 @@ func (b *backend) args() []*framework.Path {
 					Summary:  "Retrieve available options.",
 				},
 				logical.CreateOperation: &framework.PathOperation{
-					Callback: b.createOpts,
+					Callback: b.setOpts,
 				},
 				logical.UpdateOperation: &framework.PathOperation{
-					Callback: b.createOpts,
+					Callback: b.setOpts,
 					Summary:  "Set available options.",
+				},
+				logical.DeleteOperation: &framework.PathOperation{
+					Callback: b.deleteOpts,
+					Summary:  "Remove all options",
 				},
 			},
 		},
@@ -144,7 +162,7 @@ func (b *backend) existenceCheck(ctx ctx, req *logical.Request, _ *framework.Fie
 	return out != nil, nil
 }
 
-func (b *backend) verify(req *logical.Request) error {
+func (b *backend) verifyClient(req *logical.Request) error {
 	if req.ClientToken == "" {
 		return fmt.Errorf("client token empty")
 	}
@@ -152,5 +170,5 @@ func (b *backend) verify(req *logical.Request) error {
 }
 
 const haproxyHelp = `
-The HAProxy backend is a secrets backend that stores KV pairs in a map then generates a hash for userlist configs.
+The HAProxy backend is a secrets backend that stores KV pairs in a map then generates a hash for userlist config.
 `
